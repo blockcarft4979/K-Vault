@@ -44,7 +44,40 @@ export async function onRequestPost(context) {
                 );
             }
         }
+        // --- 新增：图片类型验证 ---
+        const allowedMimeTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/gif',
+            'image/webp',
+            'image/bmp',
+            'image/svg+xml',
+            'image/x-icon',
+            'image/heic',
+            'image/heif',
+            'image/avif'
+        ];
+        // 辅助函数：检查是否为图片MIME类型
+        function isImageMimeType(mimeType) {
+            return allowedMimeTypes.includes(mimeType) || mimeType.startsWith('image/');
+        }
+        // 辅助函数：检查文件扩展名
+        function isImageExtension(ext) {
+            const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif'];
+            return imageExts.includes(ext.toLowerCase());
+        }
 
+        // 执行验证
+        if (!isImageMimeType(uploadFile.type)) {
+            // 使用现有的 errorResponse 工具函数返回错误
+            return errorResponse(`不支持的文件类型：“${uploadFile.type}”。仅允许上传图片文件（如 JPG, PNG, GIF, WebP, SVG, BMP 等）。`, 400);
+        }
+        // 可选：进行更严格的扩展名验证（防止伪造MIME类型）
+        if (!isImageExtension('.' + fileExtension)) {
+            return errorResponse(`不支持的文件扩展名：“.${fileExtension}”。仅允许上传图片文件。`, 400);
+        }
+        // --- 图片验证结束 ---
+        
         // 获取存储模式 - 默认使用 telegram
         const storageMode = formData.get('storageMode') || 'telegram';
 
