@@ -1,110 +1,497 @@
-// 文件路径: /functions/api/upload/[[path]].js
+import { errorHandling, telemetryData } from "./utils/middleware.js";
+import { checkAuthentication, isAuthRequired } from "./utils/auth.js";
+import { checkGuestUpload, incrementGuestCount } from "./utils/guest.js";
+import { createS3Client } from "./utils/s3client.js";
+import { uploadToDiscord } from "./utils/discord.js";
+import { hasHuggingFaceConfig, uploadToHuggingFace } from "./utils/huggingface.js";
+import {
+    buildTelegramDirectLink,
+    buildTelegramBotApiUrl,
+    createSignedTelegramFileId,
+    getTelegramUploadMethodAndField,
+    pickTelegramFileId,
+    sendTelegramUploadNotice,
+    shouldUseSignedTelegramLinks,
+    shouldWriteTelegramMetadata,
+} from "./utils/telegram.js";
+
 export async function onRequestPost(context) {
-  const { request, env } = context;
+    const { request, env } = context;
 
-  // 1. 认证（保持不变）
-  const apiKey = request.headers.get('X-API-Key');
-  const expectedApiKey = env.API_KEY;
-  if (!expectedApiKey || apiKey !== expectedApiKey) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+    try {
+        const clonedRequest = request.clone();
+        const formData = await clonedRequest.formData();
 
-  // 2. 解析表单数据
-  const formData = await request.formData();
-  const file = formData.get('file'); // 字段名假设为 'file'
+        await errorHandling(context);
+        telemetryData(context);
 
-  if (!file || typeof file === 'string') {
-    return new Response(JSON.stringify({ error: '未上传文件或字段名无效。' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+        const uploadFile = formData.get('file');
+        if (!uploadFile) {
+            throw new Error('No file uploaded');
+        }
 
-  // 3. 【新增】图片类型验证
-  const allowedMimeTypes = [
-    'image/jpeg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'image/bmp',
-    'image/svg+xml',
-    'image/x-icon', // .ico
-    'image/heic',   // HEIC图片
-    'image/heif',   // HEIF图片
-    'image/avif',    // AVIF图片
-    'video/mp4'
-  ];
-  const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif','.mp4'];
+        const fileName = uploadFile.name;
+        const fileExtension = fileName.split('.').pop().toLowerCase();
 
-  // 检查MIME类型
-  if (!allowedMimeTypes.includes(file.type)) {
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: `不支持的文件类型：${file.type || '未知'}，支持格式：${allowedExtensions.join(', ')}。`
-    }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+        // --- 访客权限检查 ---
+        const isAdmin = await isUserAuthenticated(context);
+        if (!isAdmin) {
+            const guestCheck = await checkGuestUpload(request, env, uploadFile.size);
+            if (!guestCheck.allowed) {
+                return new Response(
+                    JSON.stringify({ error: guestCheck.reason }),
+                    { status: guestCheck.status || 403, headers: { 'Content-Type': 'application/json' } }
+                );
+            }
+        }
 
-  // 可选：双重检查文件扩展名（更严格）
-  const fileName = file.name.toLowerCase();
-  const hasValidExtension = allowedExtensions.some(ext => fileName.endsWith(ext));
-  if (!hasValidExtension) {
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: `不支持的文件扩展名。仅允许上传图片文件，支持格式：${allowedExtensions.join(', ')}。`
-    }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+        // --- 【新增】媒体文件类型验证（图片+视频）---
+        const allowedMimeTypes = [
+            // 图片类型
+            'image/jpeg',
+            'image/png',
+            'image/gif',
+            'image/webp',
+            'image/bmp',
+            'image/svg+xml',
+            'image/x-icon',
+            'image/heic',
+            'image/heif',
+            'image/avif',
+            // 视频类型
+            'video/mp4',
+            'video/webm',
+            'video/ogg',
+            'video/x-msvideo', // AVI
+            'video/quicktime', // MOV
+            'video/x-matroska', // MKV
+            'video/x-flv',
+            'video/mpeg'
+        ];
+        // 辅助函数：检查是否为允许的媒体MIME类型
+        function isAllowedMimeType(mimeType) {
+            return allowedMimeTypes.includes(mimeType) || mimeType.startsWith('image/') || mimeType.startsWith('video/');
+        }
+        // 辅助函数：检查文件扩展名
+        function isAllowedExtension(ext) {
+            const mediaExts = [
+                // 图片扩展名
+                '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif',
+                // 视频扩展名
+                '.mp4', '.webm', '.ogv', '.avi', '.mov', '.mkv', '.flv', '.mpeg', '.mpg', '.m4v'
+            ];
+            return mediaExts.includes(ext.toLowerCase());
+        }
 
-  // 4. 调用 K-Vault 原有的上传逻辑（此处需替换为实际函数）
-  let uploadResult;
-  try {
-    // 【重要】请根据 K-Vault 源码，将 `handleKvaultUpload` 替换为实际的上传处理函数
-    // 例如：uploadResult = await handleTelegramUpload(file, env, 'image');
-    uploadResult = {
-      success: true,
-      fileName: file.name,
-      fileSize: file.size,
-      mimeType: file.type,
-      url: `https://${new URL(request.url).hostname}/file/generated_${Date.now()}_${file.name}`,
-      md5: 'simulated_md5_hash',
-      storage: 'telegram', // 或根据请求参数/env配置决定
-      isImage: true // 新增标记，便于前端识别
-    };
-  } catch (error) {
-    console.error('Upload processing error:', error);
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: error.message || '图片处理失败。'
-    }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
+        // 执行验证
+        if (!isAllowedMimeType(uploadFile.type)) {
+            return errorResponse(`不支持的文件类型：“${uploadFile.type}”。仅允许上传图片和视频文件。`, 400);
+        }
+        // 可选：进行更严格的扩展名验证（防止伪造MIME类型）
+        if (!isAllowedExtension('.' + fileExtension)) {
+            return errorResponse(`不支持的文件扩展名：“.${fileExtension}”。仅允许上传图片和视频文件。`, 400);
+        }
+        // --- 验证结束 ---
 
-  // 5. 返回 JSON 响应
-  return new Response(JSON.stringify(uploadResult), {
-    headers: { 
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
+        // 获取存储模式 - 默认使用 telegram
+        const storageMode = formData.get('storageMode') || 'telegram';
+
+        let result;
+
+        // --- 根据存储模式分发 ---
+        if (storageMode === 'r2') {
+            if (!env.R2_BUCKET) {
+                return errorResponse('R2 未配置或未启用，无法上传');
+            }
+            result = await uploadToR2(uploadFile, fileName, fileExtension, env);
+        } else if (storageMode === 's3') {
+            if (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY_ID) {
+                return errorResponse('S3 未配置，无法上传');
+            }
+            result = await uploadToS3(uploadFile, fileName, fileExtension, env);
+        } else if (storageMode === 'discord') {
+            if (!env.DISCORD_WEBHOOK_URL && !env.DISCORD_BOT_TOKEN) {
+                return errorResponse('Discord 未配置，无法上传');
+            }
+            result = await uploadToDiscordStorage(uploadFile, fileName, fileExtension, env);
+        } else if (storageMode === 'huggingface') {
+            if (!hasHuggingFaceConfig(env)) {
+                return errorResponse('HuggingFace 未配置，无法上传');
+            }
+            result = await uploadToHFStorage(uploadFile, fileName, fileExtension, env);
+        } else {
+            // 默认上传到 Telegram
+            result = await uploadToTelegramStorage(
+                uploadFile,
+                fileName,
+                fileExtension,
+                env,
+                new URL(request.url).origin
+            );
+        }
+
+        // 如果返回的已经是 Response 对象，直接返回
+        if (result instanceof Response) {
+            // 访客计数（仅成功时）
+            if (!isAdmin) {
+                const status = result.status;
+                if (status >= 200 && status < 300) {
+                    await incrementGuestCount(request, env);
+                }
+            }
+            return result;
+        }
+
+        return result;
+    } catch (error) {
+        console.error('Upload error:', error);
+        return errorResponse(error.message);
     }
-  });
 }
 
-// 6. 处理 OPTIONS 预检请求（保持不变）
-export async function onRequestOptions(context) {
-  return new Response(null, {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+// 检查用户是否已认证（管理员）
+async function isUserAuthenticated(context) {
+    const { env } = context;
+    if (!isAuthRequired(env)) return true; // 无需认证时视为管理员
+    try {
+        const auth = await checkAuthentication(context);
+        return auth.authenticated;
+    } catch {
+        return false;
     }
-  });
+}
+
+function errorResponse(message, status = 500) {
+    return new Response(
+        JSON.stringify({ error: message }),
+        { status, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+// --- Telegram 上传 ---
+async function uploadToTelegramStorage(
+    uploadFile,
+    fileName,
+    fileExtension,
+    env,
+    fallbackOrigin = ""
+) {
+    const telegramFormData = new FormData();
+    telegramFormData.append("chat_id", env.TG_Chat_ID);
+
+    const { method: apiEndpoint, field } = getTelegramUploadMethodAndField(uploadFile.type);
+    telegramFormData.append(field, uploadFile);
+
+    const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
+
+    if (!result.success) {
+        throw new Error(result.error);
+    }
+
+    const fileId = pickTelegramFileId(result.data);
+    const messageId = result.messageId || result.data?.result?.message_id;
+
+    if (!fileId) {
+        throw new Error('Failed to get file ID');
+    }
+
+    const directId = await buildTelegramDirectId(
+        fileId,
+        fileExtension,
+        fileName,
+        uploadFile.type,
+        uploadFile.size,
+        messageId,
+        env
+    );
+
+    if (env.img_url && shouldWriteTelegramMetadata(env)) {
+        await env.img_url.put(`${fileId}.${fileExtension}`, "", {
+            metadata: {
+                TimeStamp: Date.now(),
+                ListType: "None",
+                Label: "None",
+                liked: false,
+                fileName: fileName,
+                fileSize: uploadFile.size,
+                storageType: 'telegram',
+                telegramFileId: fileId,
+                telegramMessageId: messageId || undefined,
+                signedLink: shouldUseSignedTelegramLinks(env),
+            }
+        });
+    }
+
+    const directLink = buildTelegramDirectLink(env, directId, fallbackOrigin);
+    try {
+        const noticeResult = await sendTelegramUploadNotice(
+            {
+                chatId: env.TG_Chat_ID,
+                replyToMessageId: messageId || undefined,
+                directLink,
+                fileId,
+                messageId,
+                fileName,
+                fileSize: uploadFile.size,
+            },
+            env
+        );
+        if (!noticeResult?.ok && !noticeResult?.skipped) {
+            console.warn(
+                "Telegram upload notice failed:",
+                noticeResult?.data?.description || noticeResult?.error || "unknown error"
+            );
+        }
+    } catch (error) {
+        console.warn("Telegram upload notice error:", error.message);
+    }
+
+    return new Response(
+        JSON.stringify([{ 'src': `/file/${directId}` }]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
+    const MAX_RETRIES = 3;
+    const apiUrl = buildTelegramBotApiUrl(env, apiEndpoint);
+
+    try {
+        // 使用 AbortController 添加 30 秒超时
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        let response;
+        try {
+            response = await fetch(apiUrl, {
+                method: "POST",
+                body: formData,
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const responseData = await response.json();
+
+        if (response.ok) {
+            return { success: true, data: responseData, messageId: responseData?.result?.message_id };
+        }
+
+        // 处理 429 速率限制
+        if (response.status === 429) {
+            const retryAfter = responseData.parameters?.retry_after || 5;
+            console.log(`Rate limited, retrying after ${retryAfter}s...`);
+            if (retryCount < MAX_RETRIES) {
+                await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+                return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+            }
+            return { success: false, error: `速率限制，请 ${retryAfter} 秒后重试` };
+        }
+
+        // 处理 413 文件过大
+        if (response.status === 413) {
+            return { success: false, error: 'Telegram 限制：文件大小不能超过 20MB' };
+        }
+
+        // 图片/音频上传失败时转为文档方式重试
+        if (retryCount < MAX_RETRIES && (apiEndpoint === 'sendPhoto' || apiEndpoint === 'sendAudio')) {
+            console.log(`Retrying ${apiEndpoint} as document...`);
+            const newFormData = new FormData();
+            newFormData.append('chat_id', formData.get('chat_id'));
+            const fileField = apiEndpoint === 'sendPhoto' ? 'photo' : 'audio';
+            newFormData.append('document', formData.get(fileField));
+            return await sendToTelegram(newFormData, 'sendDocument', env, retryCount + 1);
+        }
+
+        return {
+            success: false,
+            error: responseData.description || 'Upload to Telegram failed'
+        };
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error('Telegram API request timed out');
+            if (retryCount < MAX_RETRIES) {
+                await new Promise(resolve => setTimeout(resolve, 2000 * (retryCount + 1)));
+                return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+            }
+            return { success: false, error: '上传超时，请重试' };
+        }
+
+        console.error('Network error:', error);
+        if (retryCount < MAX_RETRIES) {
+            // 指数退避: 1s, 2s, 4s
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retryCount)));
+            return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+        }
+        return { success: false, error: '网络错误，请检查网络连接后重试' };
+    }
+}
+
+// --- R2 上传 ---
+async function uploadToR2(file, fileName, fileExtension, env) {
+    try {
+        const fileId = `r2_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const objectKey = `${fileId}.${fileExtension}`;
+        const arrayBuffer = await file.arrayBuffer();
+
+        await env.R2_BUCKET.put(objectKey, arrayBuffer, {
+            httpMetadata: { contentType: file.type },
+            customMetadata: { fileName: fileName, uploadTime: Date.now().toString() }
+        });
+
+        if (env.img_url) {
+            await env.img_url.put(`r2:${objectKey}`, "", {
+                metadata: {
+                    TimeStamp: Date.now(),
+                    ListType: "None", Label: "None", liked: false,
+                    fileName: fileName, fileSize: file.size,
+                    storageType: 'r2', r2Key: objectKey
+                }
+            });
+        }
+
+        return new Response(
+            JSON.stringify([{ 'src': `/file/r2:${objectKey}` }]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        console.error('R2 upload error:', error);
+        return errorResponse('R2 上传失败: ' + error.message);
+    }
+}
+
+// --- S3 上传 ---
+async function uploadToS3(file, fileName, fileExtension, env) {
+    try {
+        const s3 = createS3Client(env);
+        const fileId = `s3_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const objectKey = `${fileId}.${fileExtension}`;
+        const arrayBuffer = await file.arrayBuffer();
+
+        await s3.putObject(objectKey, arrayBuffer, {
+            contentType: file.type || 'application/octet-stream',
+            metadata: { 'x-amz-meta-filename': fileName, 'x-amz-meta-uploadtime': Date.now().toString() }
+        });
+
+        if (env.img_url) {
+            await env.img_url.put(`s3:${objectKey}`, "", {
+                metadata: {
+                    TimeStamp: Date.now(),
+                    ListType: "None", Label: "None", liked: false,
+                    fileName: fileName, fileSize: file.size,
+                    storageType: 's3', s3Key: objectKey
+                }
+            });
+        }
+
+        return new Response(
+            JSON.stringify([{ 'src': `/file/s3:${objectKey}` }]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        console.error('S3 upload error:', error);
+        return errorResponse('S3 上传失败: ' + error.message);
+    }
+}
+
+// --- Discord 上传 ---
+async function uploadToDiscordStorage(file, fileName, fileExtension, env) {
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await uploadToDiscord(arrayBuffer, fileName, file.type, env);
+
+        if (!result.success) {
+            return errorResponse('Discord 上传失败: ' + result.error);
+        }
+
+        const fileId = `discord_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const kvKey = `discord:${fileId}.${fileExtension}`;
+
+        if (env.img_url) {
+            await env.img_url.put(kvKey, "", {
+                metadata: {
+                    TimeStamp: Date.now(),
+                    ListType: "None", Label: "None", liked: false,
+                    fileName: fileName, fileSize: file.size,
+                    storageType: 'discord',
+                    discordChannelId: result.channelId,
+                    discordMessageId: result.messageId,
+                    discordAttachmentId: result.attachmentId,
+                    discordUploadMode: result.mode,
+                    discordSourceUrl: result.sourceUrl,
+                }
+            });
+        }
+
+        return new Response(
+            JSON.stringify([{ 'src': `/file/${kvKey}` }]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        console.error('Discord upload error:', error);
+        return errorResponse('Discord 上传失败: ' + error.message);
+    }
+}
+
+// --- HuggingFace 上传 ---
+async function uploadToHFStorage(file, fileName, fileExtension, env) {
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const fileId = `hf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const hfPath = `uploads/${fileId}.${fileExtension}`;
+
+        const result = await uploadToHuggingFace(arrayBuffer, hfPath, fileName, env);
+
+        if (!result.success) {
+            return errorResponse('HuggingFace 上传失败: ' + result.error);
+        }
+
+        const kvKey = `hf:${fileId}.${fileExtension}`;
+
+        if (env.img_url) {
+            await env.img_url.put(kvKey, "", {
+                metadata: {
+                    TimeStamp: Date.now(),
+                    ListType: "None", Label: "None", liked: false,
+                    fileName: fileName, fileSize: file.size,
+                    storageType: 'huggingface',
+                    hfPath: hfPath
+                }
+            });
+        }
+
+        return new Response(
+            JSON.stringify([{ 'src': `/file/${kvKey}` }]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        console.error('HuggingFace upload error:', error);
+        return errorResponse('HuggingFace 上传失败: ' + error.message);
+    }
+}
+
+async function buildTelegramDirectId(
+    fileId,
+    fileExtension,
+    fileName,
+    mimeType,
+    fileSize,
+    messageId,
+    env
+) {
+    if (!shouldUseSignedTelegramLinks(env)) {
+        return `${fileId}.${fileExtension}`;
+    }
+    return await createSignedTelegramFileId(
+        {
+            fileId,
+            fileExtension,
+            fileName,
+            mimeType,
+            fileSize,
+            messageId,
+        },
+        env
+    );
 }
