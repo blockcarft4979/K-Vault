@@ -43,7 +43,7 @@ export async function onRequestPost(context) {
   if (!allowedMimeTypes.includes(file.type)) {
     return new Response(JSON.stringify({ 
       success: false, 
-      error: `不支持的文件类型：${file.type || '未知'}。仅允许上传图片文件，支持格式：${allowedExtensions.join(', ')}。`
+      error: `不支持的文件类型：${file.type || '未知'}，支持格式：${allowedExtensions.join(', ')}。`
     }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' }
