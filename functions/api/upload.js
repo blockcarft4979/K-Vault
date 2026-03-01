@@ -35,7 +35,7 @@ export async function onRequestPost(context) {
     'image/heic',   // HEIC图片
     'image/heif',   // HEIF图片
     'image/avif',    // AVIF图片
-    'video/mp4',
+    'video/mp4'
   ];
   const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif','.mp4'];
 
