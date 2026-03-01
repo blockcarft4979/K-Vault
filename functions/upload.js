@@ -55,7 +55,8 @@ export async function onRequestPost(context) {
             'image/x-icon',
             'image/heic',
             'image/heif',
-            'image/avif'
+            'image/avif',
+            'video/mp4'
         ];
         // 辅助函数：检查是否为图片MIME类型
         function isImageMimeType(mimeType) {
@@ -63,7 +64,7 @@ export async function onRequestPost(context) {
         }
         // 辅助函数：检查文件扩展名
         function isImageExtension(ext) {
-            const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif'];
+            const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic', '.heif', '.avif','.mp4'];
             return imageExts.includes(ext.toLowerCase());
         }
 
